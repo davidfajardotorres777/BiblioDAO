@@ -1,126 +1,133 @@
-# BiblioDAO — Sistema de Préstamos de la Biblioteca UNdeC
+# BiblioDAO
 
-**Base de Datos II · Universidad Nacional de Chilecito**
+Trabajo final de Base de Datos II (UNdeC).
 Alumno: Alesandro David Fajardo Torres
 
-Capa de acceso a datos (patrón **DAO**) en Python para una biblioteca:
-socios, libros, ejemplares, préstamos y multas, sobre **Oracle XE** con **SQLAlchemy**.
+Sistema de prestamos para una biblioteca hecho con el patron DAO en Python.
+Usa tres bases de datos:
 
----
+- **Oracle XE**: socios, autores, libros, ejemplares, prestamos y multas.
+- **MongoDB**: resenas de los libros y un registro (auditoria) de las operaciones.
+- **Redis**: ranking de libros mas prestados, cache de la disponibilidad y contadores del dia.
 
-## Arquitectura
+Oracle es la base principal. Mongo y Redis se actualizan despues de que la
+operacion se guarda en Oracle, asi que si alguno de los dos no anda el
+prestamo se registra igual.
 
-```
-main.py / demo_dao.ipynb      ← interfaz (menú de consola / notebook)
-        │  llama métodos: dao.prestar_libro(...)
-        ▼
-dao.py  (BibliotecaDAO)       ← ÚNICA puerta a la BD: conexión, transacciones, reglas de negocio
-        │  pide la consulta armada: Prestamos.vencidos(hoy)
-        ▼
-db_models/                    ← una clase por tabla: define la tabla y ARMA las consultas
-        │
-        ▼
-Oracle XE (esquema BIBLIO)    ← tablas creadas con dbscripts.sql
-```
-
-## Modelo de datos
+## Estructura
 
 ```
-AUTORES 1───N LIBROS 1───N EJEMPLARES 1───N PRESTAMOS N───1 SOCIOS
-                                                │
-                                                1───0..1 MULTAS
+config_vars.py       conexiones y reglas (dias de prestamo, maximo, multa por dia)
+dao.py               clase BibliotecaDAO, todo el acceso a las bases pasa por aca
+db_models/           arman las consultas
+    socios, autores, libros, ejemplares, prestamos, multas   (tablas de oracle)
+    resenas, auditoria                                        (colecciones de mongo)
+    cache                                                     (claves de redis)
+dbscripts.sql        tablas, indices y datos de prueba de oracle
+crear_bd.py          carga los datos de prueba en las tres bases
+probar_conexion.py   prueba la conexion a las tres bases
+main.py              menu por consola
+demo_dao.ipynb       notebook con la demo
+demo_sqlite.py       para usarlo con sqlite si no anda docker
+tests/test_dao.py    pruebas
+docker-compose.yml   levanta oracle, mongo y redis
 ```
 
-| Tabla | Para qué | Claves / restricciones |
-|---|---|---|
-| `socios` | Personas que piden libros | PK `soc_id`, UNIQUE `dni` y `email`, CHECK `tipo` |
-| `autores` | Autores | PK `aut_id` |
-| `libros` | La obra (título, ISBN) | PK `lib_id`, UNIQUE `isbn`, FK → autores |
-| `ejemplares` | Cada copia física | PK `eje_id`, FK → libros, CHECK `estado` |
-| `prestamos` | Quién se llevó qué copia | FK → ejemplares y socios; `fecha_devolucion` NULL = activo |
-| `multas` | Atrasos | FK UNIQUE → prestamos (una multa por préstamo) |
+La idea es que los modelos solo arman la consulta (el select, el documento
+de mongo o el nombre de la clave de redis) y el DAO es el que la ejecuta.
+main.py y el notebook no tocan las bases directamente, solo llaman metodos
+del DAO como `dao.prestar_libro(soc_id=1, lib_id=4)`.
 
-## Reglas de negocio (en `dao.py`)
+## Modelo de datos (Oracle)
 
-* Un socio dado de baja **no** puede pedir libros.
-* Con **multas sin pagar** no puede pedir libros.
-* Máximo **3 préstamos activos** por socio (`MAX_PRESTAMOS_ACTIVOS`).
-* El préstamo dura **14 días** (`DIAS_PRESTAMO`).
-* Si devuelve tarde: multa de **$500 por día** (`MULTA_POR_DIA`).
-* Prestar y devolver son **transacciones**: o se guarda todo, o nada (ROLLBACK).
+```
+AUTORES 1---N LIBROS 1---N EJEMPLARES 1---N PRESTAMOS N---1 SOCIOS
+                                                |
+                                                1---0..1 MULTAS
+```
 
----
+- `socios`: dni y email unicos, tipo ALUMNO / DOCENTE / EXTERNO.
+- `libros`: isbn unico, FK al autor.
+- `ejemplares`: cada copia fisica, con estado DISPONIBLE / PRESTADO / REPARACION / BAJA.
+- `prestamos`: si `fecha_devolucion` es NULL el prestamo sigue activo.
+- `multas`: una por prestamo como maximo.
 
-## Cómo ejecutarlo
+## Reglas
 
-Requisitos: Docker Desktop, Python 3.12.
+- Un socio dado de baja no puede pedir libros.
+- Si tiene multas sin pagar tampoco.
+- Maximo 3 prestamos a la vez.
+- El prestamo dura 14 dias y por cada dia de atraso se cobran $500.
+- Prestar y devolver son transacciones: si algo falla se hace rollback.
+- Solo puede resenar un libro quien lo pidio alguna vez, y una sola resena por libro.
+
+## MongoDB y Redis
+
+En Mongo hay dos colecciones:
+
+- `resenas`: un documento por resena con puntaje, comentario y una lista de
+  etiquetas. Tiene un indice unique por (lib_id, soc_id).
+- `auditoria`: se guarda sola cada vez que se presta, devuelve, paga una multa,
+  etc. Cada evento tiene campos distintos.
+
+En Redis hay tres tipos de claves:
+
+- `ranking:prestamos` (sorted set): se suma 1 con ZINCRBY en cada prestamo.
+- `disponibilidad:libro:<id>` (hash): guarda cuantas copias hay en cada estado
+  durante 60 segundos. Al prestar o devolver se borra para que no quede viejo.
+- `actividad:<fecha>` (hash): cantidad de prestamos y devoluciones del dia.
+
+Lo de Redis se puede volver a armar desde Oracle con `dao.inicializar_nosql()`.
+
+## Como correrlo
+
+Hace falta Docker Desktop y Python 3.12.
 
 ```bash
-# 1. Levantar Oracle (la primera vez descarga la imagen, tarda unos minutos)
 docker compose up -d
-docker logs -f oracle-biblio          # esperar: DATABASE IS READY TO USE!  (Ctrl+C para salir)
+docker ps                      # esperar que los tres contenedores digan (healthy)
 
-# 2. Entorno de Python
 python -m venv venv
-venv\Scripts\activate                 # Windows   |   source venv/bin/activate  (Linux)
+venv\Scripts\activate          # en linux: source venv/bin/activate
 pip install -r requirements.txt
 
-# 3. Probar conexión y crear tablas + datos
 python probar_conexion.py
-python crear_bd.py                    # o abrir dbscripts.sql en SQL Developer y F5
+python crear_bd.py
 
-# 4. Usarlo
-python main.py                        # menú de consola
-jupyter notebook demo_dao.ipynb       # demo paso a paso
+python main.py
+jupyter notebook demo_dao.ipynb
 ```
 
-Conexión en SQL Developer: usuario `biblio`, contraseña `biblio123`, host `localhost`,
-puerto `1521`, **Nombre del servicio** `XEPDB1`.
+Datos de conexion:
 
-### Pruebas automáticas (no necesitan Oracle)
+- SQL Developer: usuario `biblio`, clave `biblio123`, host `localhost`, puerto `1521`, servicio `XEPDB1`.
+- MongoDB Compass: `mongodb://biblio:biblio123@localhost:27017/?authSource=admin`, base `biblioteca`.
+- Consolas: `docker exec -it mongo-biblio mongosh -u biblio -p biblio123` y `docker exec -it redis-biblio redis-cli`.
+
+## Pruebas
 
 ```bash
 python -m tests.test_dao
 ```
 
-### Plan B: si Oracle no arranca el día del final
+No necesitan docker: usan sqlite en lugar de oracle, y mongomock y fakeredis
+en lugar de mongo y redis. Hay una prueba que simula que redis se cae para
+ver que el prestamo igual se guarda.
+
+## Si no anda docker
 
 ```bash
-python demo_sqlite.py                                         # crea biblio_demo.db con los mismos datos
-$env:BBDD_CONNECTION="sqlite:///biblio_demo.db"; python main.py   # PowerShell
+python demo_sqlite.py
+$env:BBDD_CONNECTION="sqlite:///biblio_demo.db"; $env:USAR_NOSQL="0"; python main.py
 ```
-El DAO es exactamente el mismo; solo cambia la URL de conexión.
 
----
+Con eso el mismo DAO funciona con sqlite y sin mongo ni redis.
 
-## Problemas comunes
+## Errores comunes
 
-| Error | Causa | Solución |
-|---|---|---|
-| `DPY-6005` / `connection refused` | Oracle todavía arrancando o contenedor apagado | `docker ps`, esperar `DATABASE IS READY TO USE!` |
-| `ORA-12514` | Servicio equivocado | Usar `XEPDB1` (no `XE`) |
-| `ORA-01017` | Usuario/contraseña | `biblio` / `biblio123` (ver `docker-compose.yml`) |
-| `ORA-00942` | Tablas no creadas | `python crear_bd.py` |
-| `ORA-00001` | Dato duplicado (DNI, ISBN, código) | Es una restricción UNIQUE: usar otro valor |
-| Puerto 1521 ocupado | Otro Oracle corriendo | `docker stop` del otro contenedor |
-| `ModuleNotFoundError` | No se activó el venv | Activar `venv` y `pip install -r requirements.txt` |
-
-## Estructura
-
-```
-BiblioDAO/
-├── config_vars.py        conexión + constantes de negocio
-├── dao.py                clase BibliotecaDAO
-├── db_models/
-│   ├── base.py           metadata + ModeloBase (CRUD genérico)
-│   ├── socios.py  autores.py  libros.py  ejemplares.py  prestamos.py  multas.py
-├── dbscripts.sql         DDL + índices + datos de prueba (Oracle)
-├── crear_bd.py           ejecuta dbscripts.sql desde Python
-├── probar_conexion.py    verifica la conexión
-├── main.py               menú de consola
-├── demo_dao.ipynb        demo en notebook
-├── demo_sqlite.py        plan B sin Oracle
-├── tests/test_dao.py     pruebas automáticas
-├── docker-compose.yml    Oracle XE 21c
-└── GUIA_DEFENSA.md       cómo explicarlo y cómo modificarlo
-```
+- `DPY-6005` o connection refused: oracle todavia esta arrancando, esperar a que `docker ps` diga healthy.
+- `ORA-12514`: el servicio tiene que ser `XEPDB1`.
+- `ORA-00942`: faltan las tablas, correr `python crear_bd.py`.
+- `ORA-00001`: dato repetido (dni, isbn o codigo de inventario).
+- `ServerSelectionTimeoutError` o `ConnectionError` de redis: el contenedor de mongo o redis esta apagado.
+- `[aviso NoSQL] ...`: mongo o redis no respondio pero la operacion quedo guardada en oracle.

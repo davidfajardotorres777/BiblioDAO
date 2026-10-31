@@ -56,6 +56,14 @@ class Prestamos(ModeloBase):
                        prestamos.c.fecha_devolucion.is_(None)))
 
     @staticmethod
+    def contar_de_socio_y_libro(soc_id, lib_id):
+        """Cuantas veces el socio pidio ese libro. Se usa para las resenas."""
+        return (select(func.count())
+                .select_from(prestamos)
+                .join(ejemplares, ejemplares.c.eje_id == prestamos.c.eje_id)
+                .where(prestamos.c.soc_id == soc_id, ejemplares.c.lib_id == lib_id))
+
+    @staticmethod
     def activos(soc_id=None):
         query = (_detalle()
                  .where(prestamos.c.fecha_devolucion.is_(None))

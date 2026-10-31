@@ -1,22 +1,22 @@
 """
-Pruebas automaticas del DAO SIN necesitar Oracle.
+Pruebas del DAO sin necesitar docker.
 
-Usa SQLite (viene con Python) como base temporal: crea las tablas a partir
-de db_models, carga datos con el propio DAO y prueba cada metodo.
-Sirve para demostrar que la logica funciona y que el DAO es independiente
-del motor: solo cambia la URL de conexion.
+En vez de oracle uso sqlite, y para mongo y redis uso mongomock y fakeredis,
+que funcionan en memoria. Se le pasan al DAO en el constructor.
 
-Ejecutar desde la carpeta del proyecto:   python -m tests.test_dao
+Correr desde la carpeta del proyecto:  python -m tests.test_dao
 """
 import os
 import tempfile
 import warnings
 from datetime import date, timedelta
 
+import fakeredis
+import mongomock
 from sqlalchemy import exc as sa_exc
 
 from dao import BibliotecaDAO, BibliotecaError
-from db_models import metadata
+from db_models import metadata, cache
 
 warnings.filterwarnings("ignore", category=sa_exc.SAWarning)  # Decimal en SQLite
 
@@ -25,8 +25,11 @@ HOY = date.today()
 
 def preparar_dao():
     archivo = os.path.join(tempfile.mkdtemp(), "biblio_test.db")
-    dao = BibliotecaDAO(f"sqlite:///{archivo}")
-    metadata.create_all(dao.engine)       # en Oracle esto lo hace dbscripts.sql
+    dao = BibliotecaDAO(f"sqlite:///{archivo}",
+                        mongo=mongomock.MongoClient()["biblio_test"],
+                        redis_cli=fakeredis.FakeRedis(decode_responses=True))
+    metadata.create_all(dao.engine)       # en oracle esto lo hace dbscripts.sql
+    dao.inicializar_nosql()
     return dao
 
 
@@ -77,7 +80,7 @@ def main():
     assert len(dao.prestamos_activos(ids["lucia"])) == 1
     ok("prestar_libro marca el ejemplar como PRESTADO")
 
-    # ---- Sin copias disponibles => error y NO queda nada a medias (rollback)
+    # ---- sin copias disponibles: error y no queda nada guardado
     dao.prestar_libro(soc_id=ids["carlos"], lib_id=ids["bd"])
     msg = debe_fallar(dao.prestar_libro, soc_id=ids["lucia"], lib_id=ids["bd"])
     assert "No hay ejemplares" in msg
@@ -132,6 +135,80 @@ def main():
     assert len(dao.historial_socio(ids["lucia"])) == 5
     assert dao.resumen()["prestamos_activos"] == 4
     ok("reportes: mas prestados, historial, resumen")
+
+    # ---- resenas en mongo
+    msg = debe_fallar(dao.agregar_resena, soc_id=ids["carlos"], lib_id=ids["ficciones"], puntaje=5)
+    assert "quien lo pidio" in msg                     # carlos nunca pidio ficciones
+    dao.agregar_resena(soc_id=ids["lucia"], lib_id=ids["ficciones"], puntaje=5,
+                       comentario="Clasico", etiquetas=["Clasico", " cuentos "])
+    dao.agregar_resena(soc_id=ids["lucia"], lib_id=ids["bd"], puntaje=5,
+                       etiquetas=["teoria", "recomendado"])
+    dao.agregar_resena(soc_id=ids["carlos"], lib_id=ids["bd"], puntaje=3, etiquetas=["teoria"])
+    assert "ya reseno" in debe_fallar(dao.agregar_resena, soc_id=ids["lucia"],
+                                      lib_id=ids["ficciones"], puntaje=4)   # salta el indice unique
+    debe_fallar(dao.agregar_resena, soc_id=ids["lucia"], lib_id=ids["bd"], puntaje=7)
+    assert dao.resenas_de_libro(ids["ficciones"])[0]["etiquetas"] == ["clasico", "cuentos"]
+    assert len(dao.resenas_de_libro(ids["bd"])) == 2
+    assert len(dao.buscar_resenas_por_etiqueta("TEORIA")) == 2
+    mejores = dao.mejores_libros()
+    assert mejores[0]["lib_id"] == ids["ficciones"] and mejores[0]["promedio"] == 5
+    assert mejores[1] == {"lib_id": ids["bd"], "titulo": mejores[1]["titulo"],
+                          "promedio": 4.0, "resenas": 2}
+    assert [m["lib_id"] for m in dao.mejores_libros(minimo_resenas=2)] == [ids["bd"]]
+    assert dao.etiquetas_populares()[0] == {"etiqueta": "teoria", "cantidad": 2}
+    dao.actualizar_resena(ids["carlos"], ids["bd"], puntaje=5)
+    assert dao.mejores_libros(minimo_resenas=2)[0]["promedio"] == 5
+    dao.eliminar_resena(ids["carlos"], ids["bd"])
+    assert len(dao.resenas_de_libro(ids["bd"])) == 1
+    debe_fallar(dao.eliminar_resena, ids["carlos"], ids["bd"])
+    debe_fallar(dao.actualizar_resena, ids["carlos"], ids["bd"], puntaje=2)
+    ok("MongoDB: resenas (CRUD, regla 'solo quien lo leyo', UNIQUE, agregaciones)")
+
+    # ---- auditoria en mongo
+    eventos = {e["evento"]: e["cantidad"] for e in dao.auditoria_por_evento()}
+    assert eventos == {"PRESTAMO": 6, "DEVOLUCION": 2, "ALTA_SOCIO": 2,
+                       "MULTA_PAGADA": 1, "BAJA_SOCIO": 1}
+    ultima_devolucion = dao.auditoria(evento="DEVOLUCION", limite=1)[0]
+    assert ultima_devolucion["dias_atraso"] == 6 and ultima_devolucion["multa"] == 3000
+    assert "vence" in dao.auditoria(evento="PRESTAMO", limite=1)[0]
+    ok("MongoDB: auditoria registra cada operacion con su propio esquema")
+
+    # ---- redis: el ranking tiene que dar igual que en oracle
+    ranking = dao.ranking_tiempo_real()
+    assert ranking[0]["lib_id"] == ids["bd"] and ranking[0]["prestamos"] == 4
+    assert {r["lib_id"]: r["prestamos"] for r in ranking} == \
+           {f["lib_id"]: f["veces"] for f in dao.libros_mas_prestados()}
+    assert dao.actividad_de_hoy() == {"prestamos": 6, "devoluciones": 2}
+
+    # cache: la primera vez lee oracle, la segunda redis, y al prestar se borra
+    dao.disponibilidad(ids["ficciones"])
+    assert dao.ultima_fuente == "oracle"
+    antes = dao.disponibilidad(ids["ficciones"])
+    assert dao.ultima_fuente == "redis"
+    assert 0 < dao.redis.ttl(cache.disponibilidad(ids["ficciones"])) <= 60
+    dao.agregar_ejemplar(lib_id=ids["ficciones"], codigo_inventario="INV-F2")
+    ana = dao.crear_socio(dni="30555666", nombre="Ana", apellido="Romero", tipo="EXTERNO")
+    dao.prestar_libro(soc_id=ana, lib_id=ids["ficciones"])
+    despues = dao.disponibilidad(ids["ficciones"])
+    assert dao.ultima_fuente == "oracle" and despues["PRESTADO"] == antes["PRESTADO"] + 1
+
+    # si se borra el ranking, inicializar_nosql lo vuelve a armar desde oracle
+    dao.redis.delete(cache.RANKING_PRESTAMOS)
+    dao.inicializar_nosql()
+    assert dao.ranking_tiempo_real()[0]["prestamos"] == 4
+    ok("Redis: ranking, contadores y cache con TTL e invalidacion")
+
+    # ---- con redis caido el prestamo se guarda igual en oracle
+    servidor_caido = fakeredis.FakeServer()
+    servidor_caido.connected = False
+    dao_sin_redis = BibliotecaDAO(str(dao.engine.url), mongo=dao.mongo,
+                                  redis_cli=fakeredis.FakeRedis(server=servidor_caido))
+    pre_id = dao_sin_redis.prestar_libro(soc_id=ana, lib_id=ids["bd"])
+    assert dao_sin_redis.obtener_libro(ids["bd"]) and pre_id
+    assert len(dao_sin_redis.avisos) == 1
+    dao_sin_redis.disponibilidad(ids["bd"])
+    assert dao_sin_redis.ultima_fuente == "oracle"
+    ok("si Redis no responde, el prestamo se guarda en Oracle igual (con aviso)")
 
     dao.close()
     print("\nTODAS LAS PRUEBAS PASARON")

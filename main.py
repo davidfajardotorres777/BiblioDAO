@@ -2,7 +2,7 @@
 Menu de consola para usar el DAO.
 Ejecutar:  python main.py
 """
-from dao import BibliotecaDAO, BibliotecaError
+from dao import BibliotecaDAO, BibliotecaError, ERRORES_NOSQL
 
 
 def mostrar(filas, columnas):
@@ -40,6 +40,12 @@ MENU = """
 11. Historial de un socio
 12. Libros mas prestados
 13. Resumen
+---------- MongoDB / Redis ----------
+14. Resenas de un libro            (Mongo)
+15. Escribir una resena            (Mongo)
+16. Mejores libros por puntaje     (Mongo)
+17. Ranking en tiempo real         (Redis)
+18. Auditoria de operaciones       (Mongo)
  0. Salir
 """
 
@@ -59,6 +65,7 @@ def main():
                     lib_id = pedir_int("ID del libro: ")
                     for estado, cantidad in dao.disponibilidad(lib_id).items():
                         print(f"  {estado:<11} {cantidad}")
+                    print(f"  (dato leido de: {dao.ultima_fuente})")
                 elif opcion == "4":
                     mostrar(dao.listar_socios(),
                             ["soc_id", "dni", "apellido", "nombre", "tipo", "activo"])
@@ -96,12 +103,31 @@ def main():
                 elif opcion == "13":
                     for clave, valor in dao.resumen().items():
                         print(f"  {clave:<20} {valor}")
+                elif opcion == "14":
+                    mostrar(dao.resenas_de_libro(pedir_int("ID del libro: ")),
+                            ["socio", "puntaje", "comentario", "etiquetas"])
+                elif opcion == "15":
+                    dao.agregar_resena(
+                        soc_id=pedir_int("ID socio: "), lib_id=pedir_int("ID libro: "),
+                        puntaje=pedir_int("Puntaje (1 a 5): "),
+                        comentario=input("Comentario: "),
+                        etiquetas=input("Etiquetas separadas por coma: ").split(","))
+                    print("  Resena guardada en MongoDB.")
+                elif opcion == "16":
+                    mostrar(dao.mejores_libros(), ["titulo", "promedio", "resenas"])
+                elif opcion == "17":
+                    mostrar(dao.ranking_tiempo_real(), ["titulo", "prestamos"])
+                    print(f"  Actividad de hoy: {dao.actividad_de_hoy() or 'sin movimientos'}")
+                elif opcion == "18":
+                    mostrar(dao.auditoria(limite=10), ["fecha", "evento", "soc_id", "pre_id", "lib_id"])
                 elif opcion == "0":
                     break
                 else:
                     print("  Opcion invalida.")
             except BibliotecaError as e:
                 print(f"  [!] {e}")
+            except ERRORES_NOSQL as e:
+                print(f"  [!] MongoDB/Redis no responde ({type(e).__name__}). Revisar: docker ps")
             input("\n(Enter para continuar)")
 
 

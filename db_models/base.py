@@ -1,14 +1,12 @@
 """
 Base comun para todos los modelos.
 
-- `metadata` junta la definicion de TODAS las tablas (la usa SQLAlchemy
-  para saber como se relacionan y para armar los JOIN).
-- `ModeloBase` tiene el CRUD generico. Cada modelo (Socios, Libros, ...)
-  hereda de aca y solo define su tabla, su PK y sus consultas propias.
+metadata tiene la definicion de todas las tablas (sqlalchemy la usa para
+saber como se relacionan). ModeloBase tiene el CRUD generico y cada modelo
+hereda de aca con su tabla, su pk y sus consultas.
 
-IMPORTANTE: los modelos NO ejecutan nada. Solo ARMAN la consulta
-(select / insert / update / delete) y la devuelven. Quien la ejecuta es
-el DAO (dao.py). Asi se separa "que consulta hago" de "como me conecto".
+Los modelos no ejecutan nada, solo arman el select/insert/update/delete y
+lo devuelven. El que ejecuta es el DAO.
 """
 from sqlalchemy import MetaData, Table, select, insert, update, delete
 

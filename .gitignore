@@ -4,3 +4,8 @@ __pycache__/
 .ipynb_checkpoints/
 biblio_demo.db
 .env
+
+# apuntes personales
+GUIA_DEFENSA.md
+GUION_DEMO.md
+subir_a_github.bat

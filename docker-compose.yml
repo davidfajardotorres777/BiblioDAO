@@ -1,6 +1,10 @@
-# Levanta Oracle XE 21c y crea automaticamente el usuario BIBLIO en XEPDB1.
+# Levanta las TRES bases del proyecto (persistencia poliglota):
+#   - Oracle XE 21c  -> datos transaccionales (socios, libros, prestamos, multas)
+#   - MongoDB 7      -> documentos: resenas de libros y auditoria de operaciones
+#   - Redis 7        -> clave-valor en memoria: ranking en tiempo real y cache
+#
 #   docker compose up -d
-#   docker logs -f oracle-biblio      (esperar "DATABASE IS READY TO USE!")
+#   docker ps                         (esperar que los tres digan "healthy")
 services:
   oracle:
     image: gvenzl/oracle-xe:21-slim
@@ -20,5 +24,37 @@ services:
       retries: 30
       start_period: 30s
 
+  mongo:
+    image: mongo:7.0
+    container_name: mongo-biblio
+    ports:
+      - "27017:27017"
+    environment:
+      MONGO_INITDB_ROOT_USERNAME: biblio
+      MONGO_INITDB_ROOT_PASSWORD: biblio123
+    volumes:
+      - mongo_data:/data/db
+    healthcheck:
+      test: ["CMD", "mongosh", "--quiet", "--eval", "db.adminCommand('ping').ok"]
+      interval: 10s
+      timeout: 5s
+      retries: 10
+
+  redis:
+    image: redis:7.4-alpine
+    container_name: redis-biblio
+    ports:
+      - "6379:6379"
+    command: ["redis-server", "--appendonly", "yes"]   # guarda en disco (AOF)
+    volumes:
+      - redis_data:/data
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 10s
+      timeout: 5s
+      retries: 10
+
 volumes:
   oracle_data:
+  mongo_data:
+  redis_data:

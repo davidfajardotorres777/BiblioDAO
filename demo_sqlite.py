@@ -1,13 +1,12 @@
 """
-PLAN B sin Oracle: crea 'biblio_demo.db' (SQLite) con los MISMOS datos de
-prueba que dbscripts.sql, para poder mostrar el sistema aunque Docker/Oracle
-no arranque.
+Por si docker no anda: crea biblio_demo.db (sqlite) con los mismos datos
+de prueba que dbscripts.sql.
 
     python demo_sqlite.py
-    (Windows PowerShell)  $env:BBDD_CONNECTION="sqlite:///biblio_demo.db"; python main.py
-    (Linux / Git Bash)    BBDD_CONNECTION=sqlite:///biblio_demo.db python main.py
+    (Windows PowerShell)  $env:BBDD_CONNECTION="sqlite:///biblio_demo.db"; $env:USAR_NOSQL="0"; python main.py
+    (Linux / Git Bash)    BBDD_CONNECTION=sqlite:///biblio_demo.db USAR_NOSQL=0 python main.py
 
-El DAO es el mismo: solo cambia la URL de conexion.
+El DAO es el mismo, solo cambia la url. Con USAR_NOSQL=0 no se usan mongo ni redis.
 """
 import os
 import warnings
@@ -27,7 +26,7 @@ HOY = date.today()
 def main():
     if os.path.exists(ARCHIVO):
         os.remove(ARCHIVO)
-    with BibliotecaDAO(f"sqlite:///{ARCHIVO}") as dao:
+    with BibliotecaDAO(f"sqlite:///{ARCHIVO}", usar_nosql=False) as dao:
         metadata.create_all(dao.engine)
 
         a = {n: dao.crear_autor(nombre=n, nacionalidad=p) for n, p in [
