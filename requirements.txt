@@ -4,6 +4,7 @@ pandas==3.0.2
 notebook==7.5.5
 matplotlib==3.11.2
 pymongo==4.19.0
+python-dotenv==1.2.4
 redis==8.1.0
 # solo para las pruebas automaticas (Mongo y Redis falsos en memoria)
 mongomock==4.3.0

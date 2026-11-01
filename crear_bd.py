@@ -10,6 +10,7 @@ from pathlib import Path
 from pymongo.errors import PyMongoError
 from redis.exceptions import RedisError
 from sqlalchemy import create_engine, text
+from sqlalchemy.exc import OperationalError
 
 from config_vars import BBDD_CONNECTION, USAR_NOSQL
 from dao import BibliotecaDAO
@@ -47,15 +48,21 @@ def separar_sentencias(sql):
 def main():
     sentencias = separar_sentencias(SCRIPT.read_text(encoding="utf-8"))
     engine = create_engine(BBDD_CONNECTION)
-    with engine.begin() as con:
-        for sentencia in sentencias:
-            if sentencia.strip().upper() == "COMMIT":
-                continue                  # engine.begin() ya hace el COMMIT
-            resultado = con.execute(text(sentencia))
-            if resultado.returns_rows:    # el SELECT final de control
-                for tabla, filas in resultado:
-                    print(f"  {tabla:<11} {filas} filas")
-    engine.dispose()
+    try:
+        with engine.begin() as con:
+            for sentencia in sentencias:
+                if sentencia.strip().upper() == "COMMIT":
+                    continue                  # engine.begin() ya hace el COMMIT
+                resultado = con.execute(text(sentencia))
+                if resultado.returns_rows:    # el SELECT final de control
+                    for tabla, filas in resultado:
+                        print(f"  {tabla:<11} {filas} filas")
+    except OperationalError as e:
+        print(f"No se pudo conectar a Oracle: {e.orig}")
+        print("Revisar que el contenedor este levantado: docker ps")
+        raise SystemExit(1)
+    finally:
+        engine.dispose()
     print(f"Listo: {len(sentencias)} sentencias ejecutadas.")
 
     if USAR_NOSQL:

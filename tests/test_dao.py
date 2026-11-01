@@ -210,6 +210,40 @@ def main():
     assert dao_sin_redis.ultima_fuente == "oracle"
     ok("si Redis no responde, el prestamo se guarda en Oracle igual (con aviso)")
 
+    # ---- validaciones de datos
+    assert "DNI" in debe_fallar(dao.crear_socio, dni="12ab", nombre="X", apellido="Y", tipo="ALUMNO")
+    assert "Falta" in debe_fallar(dao.crear_socio, dni="12345678", nombre=" ", apellido="Y",
+                                  tipo="ALUMNO")
+    assert "email" in debe_fallar(dao.crear_socio, dni="12345678", nombre="X", apellido="Y",
+                                  tipo="ALUMNO", email="sin-arroba")
+    assert "Solo se puede cambiar" in debe_fallar(dao.actualizar_socio, ids["lucia"], telefono="1")
+    assert "No existe" in debe_fallar(dao.actualizar_socio, 999, nombre="X")
+    assert "No existe" in debe_fallar(dao.dar_de_baja_socio, 999)
+    assert "No existe" in debe_fallar(dao.disponibilidad, 999)
+    assert "Falta" in debe_fallar(dao.crear_libro, isbn=" ", titulo="X", aut_id=1)
+    assert "Anio" in debe_fallar(dao.crear_libro, isbn="333", titulo="X", aut_id=1, anio=3000)
+    assert "puntaje" in debe_fallar(dao.agregar_resena, soc_id=ids["lucia"], lib_id=ids["bd"],
+                                    puntaje=True)
+    assert "dias" in debe_fallar(dao.prestar_libro, soc_id=ana, lib_id=ids["bd"], dias=0)
+    pre_ana = dao.prestamos_activos(ana)[0]["pre_id"]
+    assert "anterior" in debe_fallar(dao.devolver_libro, pre_ana,
+                                     fecha_devolucion=HOY - timedelta(days=60))
+    ok("validaciones: datos vacios o invalidos, ids que no existen, fechas imposibles")
+
+    # ---- estados de los ejemplares
+    copias = dao.listar_ejemplares(ids["bd"])
+    prestada = next(e["eje_id"] for e in copias if e["estado"] == "PRESTADO")
+    libre = next(e["eje_id"] for e in copias if e["estado"] == "DISPONIBLE")
+    assert "devolverla" in debe_fallar(dao.cambiar_estado_ejemplar, prestada, "DISPONIBLE")
+    assert "prestar_libro" in debe_fallar(dao.cambiar_estado_ejemplar, libre, "PRESTADO")
+    assert "No existe" in debe_fallar(dao.cambiar_estado_ejemplar, 999, "BAJA")
+    antes = dao.disponibilidad(ids["bd"])
+    dao.cambiar_estado_ejemplar(libre, "reparacion")
+    despues = dao.disponibilidad(ids["bd"])
+    assert dao.ultima_fuente == "oracle" and despues["REPARACION"] == antes["REPARACION"] + 1
+    assert dao.auditoria(evento="CAMBIO_ESTADO_EJEMPLAR", limite=1)[0]["estado"] == "REPARACION"
+    ok("estados de ejemplares: PRESTADO solo por prestar/devolver, la cache se actualiza")
+
     dao.close()
     print("\nTODAS LAS PRUEBAS PASARON")
 

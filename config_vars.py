@@ -1,11 +1,15 @@
 """
 Configuracion del proyecto.
-Los datos de conexion se pueden cambiar con variables de entorno
-(o editando los valores por defecto de aca abajo).
+Los datos de conexion se pueden cambiar en un archivo .env (copiar
+.env.example) o con variables de entorno. Si no hay nada se usan los
+valores por defecto de aca abajo, que son los del docker-compose.
 """
 import os
 
+from dotenv import load_dotenv
 from sqlalchemy.engine import URL
+
+load_dotenv()
 
 # ------------------------- Conexion a Oracle -------------------------
 DB_USER = os.getenv("DB_USER", "biblio")

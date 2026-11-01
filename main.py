@@ -2,7 +2,7 @@
 Menu de consola para usar el DAO.
 Ejecutar:  python main.py
 """
-from dao import BibliotecaDAO, BibliotecaError, ERRORES_NOSQL
+from dao import BibliotecaDAO, BibliotecaError, ERRORES_CONEXION
 
 
 def mostrar(filas, columnas):
@@ -46,8 +46,77 @@ MENU = """
 16. Mejores libros por puntaje     (Mongo)
 17. Ranking en tiempo real         (Redis)
 18. Auditoria de operaciones       (Mongo)
+-------------------------------------
+19. Administracion
  0. Salir
 """
+
+MENU_ADMIN = """
+----------- ADMINISTRACION -----------
+ 1. Agregar autor
+ 2. Agregar libro
+ 3. Agregar ejemplar (copia) a un libro
+ 4. Ver ejemplares de un libro
+ 5. Cambiar estado de un ejemplar
+ 6. Modificar datos de un socio
+ 7. Dar de baja un socio
+ 8. Modificar una resena
+ 9. Borrar una resena
+ 0. Volver
+"""
+
+
+def administracion(dao):
+    print(MENU_ADMIN)
+    opcion = input("Opcion: ").strip()
+    if opcion == "1":
+        mostrar(dao.listar_autores(), ["aut_id", "nombre", "nacionalidad"])
+        nombre = input("Nombre: ")
+        nacionalidad = input("Nacionalidad (opcional): ")
+        aut_id = dao.crear_autor(nombre=nombre, nacionalidad=nacionalidad)
+        print(f"  Autor creado con id {aut_id}")
+    elif opcion == "2":
+        mostrar(dao.listar_autores(), ["aut_id", "nombre"])
+        isbn = input("ISBN: ")
+        titulo = input("Titulo: ")
+        aut_id = pedir_int("ID del autor: ")
+        anio = input("Anio (opcional): ").strip()
+        categoria = input("Categoria (opcional): ")
+        lib_id = dao.crear_libro(isbn=isbn, titulo=titulo, aut_id=aut_id,
+                                 anio=int(anio) if anio.isdigit() else None,
+                                 categoria=categoria)
+        print(f"  Libro creado con id {lib_id} (todavia no tiene copias)")
+    elif opcion == "3":
+        eje_id = dao.agregar_ejemplar(lib_id=pedir_int("ID del libro: "),
+                                      codigo_inventario=input("Codigo de inventario: "))
+        print(f"  Ejemplar creado con id {eje_id}")
+    elif opcion == "4":
+        mostrar(dao.listar_ejemplares(pedir_int("ID del libro: ")),
+                ["eje_id", "codigo_inventario", "estado"])
+    elif opcion == "5":
+        dao.cambiar_estado_ejemplar(pedir_int("ID del ejemplar: "),
+                                    input("Nuevo estado (DISPONIBLE/REPARACION/BAJA): "))
+        print("  Estado cambiado.")
+    elif opcion == "6":
+        soc_id = pedir_int("ID socio: ")
+        print("  Dejar vacio lo que no se cambia.")
+        cambios = {campo: valor for campo in ("nombre", "apellido", "email", "tipo")
+                   if (valor := input(f"  {campo.capitalize()}: ").strip())}
+        dao.actualizar_socio(soc_id, **cambios)
+        print("  Socio actualizado.")
+    elif opcion == "7":
+        dao.dar_de_baja_socio(pedir_int("ID socio: "))
+        print("  Socio dado de baja.")
+    elif opcion == "8":
+        soc_id = pedir_int("ID socio: ")
+        lib_id = pedir_int("ID libro: ")
+        puntaje = pedir_int("Nuevo puntaje (1 a 5): ")
+        comentario = input("Nuevo comentario: ")
+        dao.actualizar_resena(soc_id, lib_id, puntaje=puntaje, comentario=comentario)
+        print("  Resena actualizada.")
+    elif opcion == "9":
+        dao.eliminar_resena(pedir_int("ID socio: "), pedir_int("ID libro: "))
+        print("  Resena borrada.")
 
 
 def main():
@@ -120,14 +189,16 @@ def main():
                     print(f"  Actividad de hoy: {dao.actividad_de_hoy() or 'sin movimientos'}")
                 elif opcion == "18":
                     mostrar(dao.auditoria(limite=10), ["fecha", "evento", "soc_id", "pre_id", "lib_id"])
+                elif opcion == "19":
+                    administracion(dao)
                 elif opcion == "0":
                     break
                 else:
                     print("  Opcion invalida.")
             except BibliotecaError as e:
                 print(f"  [!] {e}")
-            except ERRORES_NOSQL as e:
-                print(f"  [!] MongoDB/Redis no responde ({type(e).__name__}). Revisar: docker ps")
+            except ERRORES_CONEXION as e:
+                print(f"  [!] No responde la base de datos ({type(e).__name__}). Revisar: docker ps")
             input("\n(Enter para continuar)")
 
 

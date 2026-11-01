@@ -19,7 +19,7 @@ from pymongo import MongoClient
 from pymongo.errors import DuplicateKeyError, PyMongoError
 from redis.exceptions import RedisError
 from sqlalchemy import create_engine
-from sqlalchemy.exc import IntegrityError
+from sqlalchemy.exc import IntegrityError, OperationalError
 
 from config_vars import (BBDD_CONNECTION, DIAS_PRESTAMO, MAX_PRESTAMOS_ACTIVOS,
                          MULTA_POR_DIA, USAR_NOSQL, MONGO_URI, MONGO_DB, REDIS_URL,
@@ -29,6 +29,8 @@ from db_models import (Socios, Autores, Libros, Ejemplares, Prestamos, Multas,
                        Resenas, PUNTAJE_MIN, PUNTAJE_MAX, Auditoria, cache)
 
 ERRORES_NOSQL = (PyMongoError, RedisError)
+ERRORES_CONEXION = (OperationalError,) + ERRORES_NOSQL   # alguna base apagada o sin red
+CAMPOS_SOCIO_EDITABLES = {"dni", "nombre", "apellido", "email", "tipo"}
 
 
 class BibliotecaError(Exception):
@@ -38,6 +40,26 @@ class BibliotecaError(Exception):
 def _a_fecha(valor):
     # oracle devuelve los DATE como datetime, lo paso a date para poder restar dias
     return valor.date() if isinstance(valor, datetime) else valor
+
+
+def _obligatorio(valor, campo):
+    if valor is None or not str(valor).strip():
+        raise BibliotecaError(f"Falta el dato: {campo}")
+    return str(valor).strip()
+
+
+def _validar_dni(dni):
+    dni = _obligatorio(dni, "dni")
+    if not dni.isdigit() or not 7 <= len(dni) <= 8:
+        raise BibliotecaError("El DNI tiene que tener 7 u 8 numeros")
+    return dni
+
+
+def _validar_puntaje(puntaje):
+    # bool cuenta como int en python (True == 1), por eso se descarta aparte
+    if isinstance(puntaje, bool) or not isinstance(puntaje, int) \
+            or not PUNTAJE_MIN <= puntaje <= PUNTAJE_MAX:
+        raise BibliotecaError(f"El puntaje va de {PUNTAJE_MIN} a {PUNTAJE_MAX}")
 
 
 class BibliotecaDAO:
@@ -149,24 +171,48 @@ class BibliotecaDAO:
     def buscar_socio_por_dni(self, dni):
         return self._uno(Socios.por_dni(dni))
 
+    def _validar_socio(self, datos):
+        # se usa al crear y al actualizar, solo revisa los campos que vienen
+        if "dni" in datos:
+            datos["dni"] = _validar_dni(datos["dni"])
+        for campo in ("nombre", "apellido"):
+            if campo in datos:
+                datos[campo] = _obligatorio(datos[campo], campo)
+        if "tipo" in datos:
+            datos["tipo"] = _obligatorio(datos["tipo"], "tipo").upper()
+            if datos["tipo"] not in TIPOS_SOCIO:
+                raise BibliotecaError(f"Tipo invalido. Opciones: {', '.join(TIPOS_SOCIO)}")
+        if datos.get("email"):
+            if "@" not in datos["email"]:
+                raise BibliotecaError("El email no es valido")
+        elif "email" in datos:
+            datos["email"] = None
+        return datos
+
     def crear_socio(self, *, dni, nombre, apellido, tipo, email=None):
-        tipo = tipo.upper()
-        if tipo not in TIPOS_SOCIO:
-            raise BibliotecaError(f"Tipo invalido. Opciones: {', '.join(TIPOS_SOCIO)}")
-        soc_id = self._insertar(Socios.insertar(
-            dni=dni, nombre=nombre, apellido=apellido, email=email,
-            tipo=tipo, fecha_alta=date.today(), activo=1))
-        self._sincronizar(lambda: self._auditar("ALTA_SOCIO", soc_id=soc_id, dni=dni, tipo=tipo))
+        datos = self._validar_socio(dict(dni=dni, nombre=nombre, apellido=apellido,
+                                         tipo=tipo, email=email))
+        soc_id = self._insertar(Socios.insertar(**datos, fecha_alta=date.today(), activo=1))
+        self._sincronizar(lambda: self._auditar("ALTA_SOCIO", soc_id=soc_id,
+                                                dni=datos["dni"], tipo=datos["tipo"]))
         return soc_id
 
     def actualizar_socio(self, soc_id, **cambios):
         # ej: dao.actualizar_socio(3, email="nuevo@mail.com")
-        return self._modificar(Socios.actualizar(soc_id, **cambios))
+        invalidos = set(cambios) - CAMPOS_SOCIO_EDITABLES
+        if invalidos or not cambios:
+            raise BibliotecaError("Solo se puede cambiar: "
+                                  + ", ".join(sorted(CAMPOS_SOCIO_EDITABLES)))
+        filas = self._modificar(Socios.actualizar(soc_id, **self._validar_socio(cambios)))
+        if filas == 0:
+            raise BibliotecaError(f"No existe el socio {soc_id}")
+        return filas
 
     def dar_de_baja_socio(self, soc_id):
         filas = self._modificar(Socios.dar_de_baja(soc_id))
-        if filas:
-            self._sincronizar(lambda: self._auditar("BAJA_SOCIO", soc_id=soc_id))
+        if filas == 0:
+            raise BibliotecaError(f"No existe el socio {soc_id}")
+        self._sincronizar(lambda: self._auditar("BAJA_SOCIO", soc_id=soc_id))
         return filas
 
     # ---------------------------------------------------------------
@@ -176,7 +222,8 @@ class BibliotecaDAO:
         return self._todos(Autores.todos())
 
     def crear_autor(self, *, nombre, nacionalidad=None):
-        return self._insertar(Autores.insertar(nombre=nombre, nacionalidad=nacionalidad))
+        return self._insertar(Autores.insertar(nombre=_obligatorio(nombre, "nombre"),
+                                               nacionalidad=nacionalidad or None))
 
     def listar_libros(self, *, categoria=None):
         return self._todos(Libros.con_autor(categoria=categoria))
@@ -188,10 +235,14 @@ class BibliotecaDAO:
         return self._uno(Libros.por_id(lib_id))
 
     def crear_libro(self, *, isbn, titulo, aut_id, anio=None, categoria=None):
+        isbn = _obligatorio(isbn, "isbn")
+        titulo = _obligatorio(titulo, "titulo")
+        if anio is not None and not 0 < anio <= date.today().year:
+            raise BibliotecaError(f"Anio invalido: {anio}")
         if self._uno(Autores.por_id(aut_id)) is None:
             raise BibliotecaError(f"No existe el autor {aut_id}")
         return self._insertar(Libros.insertar(
-            isbn=isbn, titulo=titulo, aut_id=aut_id, anio=anio, categoria=categoria))
+            isbn=isbn, titulo=titulo, aut_id=aut_id, anio=anio, categoria=categoria or None))
 
     # ---------------------------------------------------------------
     # ejemplares
@@ -200,6 +251,7 @@ class BibliotecaDAO:
         return self._todos(Ejemplares.de_libro(lib_id))
 
     def agregar_ejemplar(self, *, lib_id, codigo_inventario):
+        codigo_inventario = _obligatorio(codigo_inventario, "codigo de inventario")
         if self.obtener_libro(lib_id) is None:
             raise BibliotecaError(f"No existe el libro {lib_id}")
         eje_id = self._insertar(Ejemplares.insertar(
@@ -208,17 +260,25 @@ class BibliotecaDAO:
         return eje_id
 
     def cambiar_estado_ejemplar(self, eje_id, estado):
-        estado = estado.upper()
+        estado = _obligatorio(estado, "estado").upper()
         if estado not in ESTADOS_EJEMPLAR:
             raise BibliotecaError(f"Estado invalido. Opciones: {', '.join(ESTADOS_EJEMPLAR)}")
-        filas = self._modificar(Ejemplares.actualizar(eje_id, estado=estado))
         ejemplar = self._uno(Ejemplares.por_id(eje_id))
-        if filas and ejemplar:
-            def sincronizar():
-                self._invalidar_disponibilidad(ejemplar["lib_id"])
-                self._auditar("CAMBIO_ESTADO_EJEMPLAR", eje_id=eje_id,
-                              lib_id=ejemplar["lib_id"], estado=estado)
-            self._sincronizar(sincronizar)
+        if ejemplar is None:
+            raise BibliotecaError(f"No existe el ejemplar {eje_id}")
+        # PRESTADO solo lo pone prestar_libro y solo lo saca devolver_libro,
+        # si no quedaria un prestamo activo con la copia en otro estado
+        if estado == "PRESTADO":
+            raise BibliotecaError("Para prestar una copia hay que usar prestar_libro")
+        if ejemplar["estado"] == "PRESTADO":
+            raise BibliotecaError("La copia esta prestada, primero hay que devolverla")
+        filas = self._modificar(Ejemplares.actualizar(eje_id, estado=estado))
+
+        def sincronizar():
+            self._invalidar_disponibilidad(ejemplar["lib_id"])
+            self._auditar("CAMBIO_ESTADO_EJEMPLAR", eje_id=eje_id,
+                          lib_id=ejemplar["lib_id"], estado=estado)
+        self._sincronizar(sincronizar)
         return filas
 
     def disponibilidad(self, lib_id):
@@ -242,6 +302,8 @@ class BibliotecaDAO:
         conteo = {estado: 0 for estado in ESTADOS_EJEMPLAR}
         for fila in self._todos(Ejemplares.conteo_por_estado(lib_id)):
             conteo[fila["estado"]] = fila["cantidad"]
+        if not any(conteo.values()) and self.obtener_libro(lib_id) is None:
+            raise BibliotecaError(f"No existe el libro {lib_id}")
         self.ultima_fuente = "oracle"
 
         def guardar_en_cache():
@@ -260,6 +322,8 @@ class BibliotecaDAO:
         guarda nada.
         """
         hoy = hoy or date.today()
+        if isinstance(dias, bool) or not isinstance(dias, int) or dias < 1:
+            raise BibliotecaError("Los dias de prestamo tienen que ser 1 o mas")
         with self.engine.begin() as con:
             socio = con.execute(Socios.por_id(soc_id)).mappings().first()
             if socio is None:
@@ -318,6 +382,8 @@ class BibliotecaDAO:
                 raise BibliotecaError(f"No existe el prestamo {pre_id}")
             if prestamo["fecha_devolucion"] is not None:
                 raise BibliotecaError("Ese prestamo ya fue devuelto")
+            if fecha_devolucion < _a_fecha(prestamo["fecha_prestamo"]):
+                raise BibliotecaError("La fecha de devolucion es anterior al prestamo")
 
             con.execute(Prestamos.registrar_devolucion(pre_id, fecha_devolucion))
             con.execute(Ejemplares.liberar(prestamo["eje_id"]))
@@ -389,8 +455,7 @@ class BibliotecaDAO:
         - una sola resena por socio y libro (indice unique en mongo)
         """
         self._requiere_nosql()
-        if not isinstance(puntaje, int) or not PUNTAJE_MIN <= puntaje <= PUNTAJE_MAX:
-            raise BibliotecaError(f"El puntaje va de {PUNTAJE_MIN} a {PUNTAJE_MAX}")
+        _validar_puntaje(puntaje)
         socio = self.obtener_socio(soc_id)
         if socio is None:
             raise BibliotecaError(f"No existe el socio {soc_id}")
@@ -424,10 +489,8 @@ class BibliotecaDAO:
     def actualizar_resena(self, soc_id, lib_id, **cambios):
         # ej: dao.actualizar_resena(1, 4, puntaje=4, etiquetas=["denso"])
         self._requiere_nosql()
-        puntaje = cambios.get("puntaje")
-        if puntaje is not None and (not isinstance(puntaje, int)
-                                    or not PUNTAJE_MIN <= puntaje <= PUNTAJE_MAX):
-            raise BibliotecaError(f"El puntaje va de {PUNTAJE_MIN} a {PUNTAJE_MAX}")
+        if "puntaje" in cambios:
+            _validar_puntaje(cambios["puntaje"])
         r = self.mongo[Resenas.coleccion].update_one(
             Resenas.de_socio_y_libro(soc_id, lib_id), Resenas.cambios(**cambios))
         if r.matched_count == 0:
